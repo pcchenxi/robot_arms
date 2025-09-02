@@ -26,12 +26,12 @@ This package provides a thin convenience layer. You still need the vendor SDKs/d
 #### Kinova Kortex2 SDK (Gen3 / Gen3 Lite)
 
 - Repo/Docs: https://github.com/Kinovarobotics/Kinova-kortex2_Gen3_G3L
-
+- A simple documentation is inside folder ./external/kinova/
 
 #### Gripper SDK/API (RMAXIS v6)
 
 - Docs: https://doc.rmaxis.com/docs/sdk/api_v6/
-
+- The python sdk with a simple documentation are inside folder ./external/gripper_SDK/
 
 ### cuRobo Install
 
