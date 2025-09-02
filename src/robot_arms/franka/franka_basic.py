@@ -133,6 +133,8 @@ class Franka:
         else:
             trans_local, quat_local = translation, quaternion
         motion = CartesianMotion(Affine(trans_local, quat_local))
+
+        # can use try -- except to catch libfranka error, recover error and reexecute
         self.robot.move(motion, asynchronous=asynchronous)
 
     def set_ee_pose_curobo(self, translation, quaternion, asynchronous=True, frame='global'):
