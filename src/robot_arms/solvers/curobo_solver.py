@@ -23,8 +23,8 @@ class CuRoboIKSolver:
         self,
         robot_name: str,
         num_seeds: int = 100,
-        position_threshold: float = 0.005,
-        rotation_threshold: float = 0.05,
+        position_threshold: float = 0.001,
+        rotation_threshold: float = 0.01,
         use_cuda_graph: bool = True,
     ):
         """
@@ -97,6 +97,19 @@ class CuRoboIKSolver:
         else:
             raise ValueError("Quaternion tensor must be shape [4] or [B,4].")
 
+    @staticmethod
+    def _wxyz_to_xyzw(quat_wxyz: torch.Tensor) -> torch.Tensor:
+        """Convert quaternion (x,y,z,w) -> (w,x,y,z)."""
+        # Supports [B,4] or [4]
+        if quat_wxyz.dim() == 1:
+            w, x, y, z = quat_wxyz
+            return torch.stack((x, y, z, w), dim=0)
+        elif quat_wxyz.dim() == 2:
+            w, x, y, z = quat_wxyz.unbind(dim=1)
+            return torch.stack((x, y, z, w), dim=1)
+        else:
+            raise ValueError("Quaternion tensor must be shape [4] or [B,4].")
+
     def get_target_joint(
         self,
         current_q: np.ndarray,
@@ -116,7 +129,7 @@ class CuRoboIKSolver:
             q_best:          (dof,) numpy array with the selected joint target.
         """        
         # --- convert inputs to torch
-        current_q = torch.as_tensor(current_q, device=self.device, dtype=self.dtype).view(-1)
+        current_q = torch.as_tensor(np.array(current_q), device=self.device, dtype=self.dtype).view(-1)
         # out = self.kin_model.get_state(current_q.view(1, -1))
 
         pos = torch.as_tensor(ee_trans, device=self.device, dtype=self.dtype).view(1, 3)
@@ -161,13 +174,14 @@ class CuRoboIKSolver:
         best_idx = torch.argmin(cost)
         q_best = candidates[best_idx]
 
-        out = self.kin_model.get_state(q_best.view(1, -1))
-        print(ee_trans, ee_quat_xyzw)
-        print(out.ee_position, out.ee_quaternion)
-        print(q_best.shape, q_best)
+        # out = self.kin_model.get_state(q_best.view(1, -1))
+        # print('[curobo] target received:', ee_trans, ee_quat_xyzw)
+        # print('[curobo] target FK:', out.ee_position, out.ee_quaternion)
+        # print('[curobo] target q value:', q_best.shape, q_best)
         return q_best.detach().cpu().numpy().tolist()
 
     def forward_kinematics(self, joint_q):
         joint_q = torch.as_tensor(joint_q, device=self.device, dtype=self.dtype).view(-1)
         out = self.kin_model.get_state(joint_q.view(1, -1))
-        return out.ee_position, out.ee_quaternion
+        quat_xyzw = self._wxyz_to_xyzw(out.ee_quaternion)
+        return out.ee_position, quat_xyzw

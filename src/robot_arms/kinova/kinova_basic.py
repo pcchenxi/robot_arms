@@ -305,17 +305,18 @@ class Kinova:
         设置夹爪开口宽度。
         
         参数：
-            width (float): 目标开口宽度（毫米）
+            width (float): 目标开口宽度（米）
             asynchronous (bool): 是否异步执行
         返回：
             bool: True-动作完成，False-超时/中止
         """
+        current_width = (40-self.gripper.position())/1000
+        print('set gripper openning:', width, "current openning:", current_width)
         if self.gripper is None:
             print("[Kinova] 夹爪未连接")
             return False
         
         try:
-            current_width = self.gripper.position()
             if width > 0.01:
                 width = 0.04
             else:
@@ -323,7 +324,7 @@ class Kinova:
 
             if abs(current_width - width) > 0.01:
                 # 使用绝对运动到指定位置
-                self.gripper.move_absolute(width, 50.0, 100.0, 100.0, 0.1)
+                self.gripper.move_absolute(40-width*1000, 50.0, 100.0, 100.0, 0.1)
             
             if not asynchronous:
                 # 等待动作完成
@@ -339,12 +340,41 @@ class Kinova:
             return False
     
     def set_ee_pose(self, translation, quaternion, asynchronous=True, frame='global'):
-        if self.control_mode == 'curobo':
-            self.set_ee_pose_curobo(translation, quaternion, asynchronous, frame)
+        # shifted_translation = translation
+        if frame == 'global':
+            trans_local, quat_local = self.transform_to_local(translation, quaternion)
         else:
-            self.ee_move(translation, quaternion, asynchronous)
+            trans_local, quat_local = translation, quaternion
 
-    def set_ee_pose_curobo(self, translation, quaternion, asynchronous=True, frame='global'):
+        if self.control_mode == 'curobo':
+            self.set_ee_pose_curobo(trans_local, quat_local, asynchronous)
+        else:
+            self.ee_move(trans_local, quat_local, asynchronous)
+
+    def corrected_target(self, trans_target, quat_target):
+        # Current FK and measured EE
+        lib_joint = self.get_joint_pose()
+        fk_ee_trans, fk_ee_quat = self.ik_solver.forward_kinematics(lib_joint)
+        lib_ee_trans, lib_ee_quat, _ = self.get_ee_pose(frame='local')
+        print("[Kinova] Lib:", lib_ee_trans, lib_ee_quat)
+        print("[Kinova] FK:", fk_ee_trans, fk_ee_quat)
+
+        # Compute translation error (measured - FK)
+        trans_diff = lib_ee_trans - fk_ee_trans.cpu().numpy()
+        # print("[Kinova] translation shift:", trans_diff)
+
+        # Apply translation correction to the target
+        trans_cmd = trans_target + trans_diff[0]
+
+        # orrect rotation by comparing quaternions:
+        rot_fk = Rotation.from_quat(fk_ee_quat.cpu().numpy())
+        rot_ms = Rotation.from_quat(lib_ee_quat)
+        rot_err = rot_ms * rot_fk.inv()
+        quat_cmd = (rot_err.inv() * Rotation.from_quat(quat_target)).as_quat()
+        # quat_cmd = quat_target 
+        return trans_cmd, quat_cmd
+
+    def set_ee_pose_curobo(self, trans_local, quat_local, asynchronous=True):
         """
         控制机器人运动到指定末端位姿。
         
@@ -354,16 +384,16 @@ class Kinova:
             asynchronous (bool): 是否异步执行
             frame (str): 'global'或'local'，指定输入位姿的参考系
         """
-        # shifted_translation = translation
-        if frame == 'global':
-            trans_local, quat_local = self.transform_to_local(translation, quaternion)
-        else:
-            trans_local, quat_local = translation, quaternion
-
+        print('[kinova] target set', trans_local, quat_local)
         # solving ik using cuRobo
         current_q = self.get_joint_pose()
+        # trans_corrected, quat_corrected = self.corrected_target(trans_local, quat_local)
+        # q_target = self.ik_solver.get_target_joint(current_q, trans_corrected, quat_corrected)
         q_target = self.ik_solver.get_target_joint(current_q, trans_local, quat_local)
+
         self.set_joint_pose(q_target, asynchronous=asynchronous)
+        trans_lib, quat_lib, _ = self.get_ee_pose(frame='local')
+        print('[kinova] target reached', trans_lib, quat_lib)
 
     def set_joint_pose(self, joint_pose, asynchronous=False):
         """
@@ -406,8 +436,11 @@ class Kinova:
             self.base.ExecuteAction(action)
             
             finished = e.wait(self.timeout_duration)
-            self.base.Unsubscribe(notification_handle)
-            
+            self.base.Unsubscribe(notification_handle)            
+            # current_q = self.get_joint_pose()
+            # print('[Kinova] q target:', joint_pose)
+            # print('[Kinova] q reached:', current_q)
+
             return finished
         else:
             # print(f"[Kinova] 异步移动到关节角: {joint_pose}")
@@ -533,7 +566,7 @@ class Kinova:
             angle_rad = (angle_rad + np.pi) % (2 * np.pi) - np.pi
             joint_pose_rad.append(angle_rad)
             
-        return joint_pose_rad
+        return np.array(joint_pose_rad)
     
 
     
@@ -606,10 +639,7 @@ class Kinova:
         
         return joint_torque[:7]
     
-    def ee_move(self, trans, quat, asynchronous=False, frame='global'):
-        if frame == 'global':
-            trans, trans = self.transform_to_local(trans, trans)
-
+    def ee_move(self, trans, quat, asynchronous=False):
         R = Rotation.from_quat(quat)
         euler = R.as_euler('xyz', degrees=True)
         action = Base_pb2.Action()

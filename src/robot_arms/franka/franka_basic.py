@@ -225,3 +225,6 @@ class Franka:
 
         print('FK:', fk_ee_trans, fk_ee_quat)
         print('lib:', lib_ee_trans, lib_ee_quat)
+
+    def stop_motion(self):
+        pass
