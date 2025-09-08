@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
 def so3_log(R):
     """Log map: SO(3) -> R^3 (rotation vector), numerically stable near 0."""
@@ -98,3 +99,49 @@ def resolved_rate_motion_control(
     qdot = clamp_joint_vel(qdot, qdot_limits)
     # qdot = slew_limit(qdot, qdot_prev, a_max, dt)
     return qdot, v_ee
+
+def joint_p_control(q_current, q_target, kp=1.0, qdot_limits=5.0):
+    """Simple joint-space P controller with optional velocity limits."""
+    # convert to degrees
+
+    qdot = kp * (q_target - q_current)  # joint-space proportional velocity
+
+    # Velocity and optional accel limits
+    if qdot_limits is not None:
+        scale = max(1.0, np.max(np.abs(qdot)/(np.array(qdot_limits)+1e-12)))
+        if scale > 1.0: qdot /= scale
+
+
+def _saturate(vec: np.ndarray, max_norm: float) -> np.ndarray:
+    """Scale vec to have at most max_norm (leave direction intact)."""
+    n = np.linalg.norm(vec)
+    if n <= 1e-12 or max_norm <= 0.0:
+        return np.zeros_like(vec)
+    if n > max_norm:
+        return vec * (max_norm / n)
+    return vec
+
+def ee_p_control(trans_current, quat_current, trans_target, quat_target, kp=1.0, kw=1.0, v_max=0.2, w_max=10.0):
+    # --- Position control (P) ---
+    p_cur = np.asarray(trans_current, dtype=float).reshape(3)
+    p_tgt = np.asarray(trans_target, dtype=float).reshape(3)
+    pos_err = p_tgt - p_cur                         # [m]
+    v_cmd = kp * pos_err                            # [m/s]
+    # v_cmd = _saturate(v_cmd, v_max)
+
+    # --- Orientation control (P on rotation vector) ---
+    # Build rotations (SciPy expects quaternion in (x,y,z,w) order)
+    R_cur = R.from_quat(np.asarray(quat_current, dtype=float))
+    R_tgt = R.from_quat(np.asarray(quat_target, dtype=float))
+
+    # Rotation that takes current to target
+    R_err = R_tgt * R_cur.inv()
+    # Rotation vector (axis * angle), in radians
+    rotvec = R_err.as_rotvec()                      # [rad] direction * angle
+    w_cmd = kw * rotvec                             # [rad/s]
+
+    # # Saturate angular speed by magnitude (convert limit deg/s -> rad/s)
+    # w_max_rad = np.deg2rad(float(w_max))
+    # w_cmd = _saturate(w_cmd, w_max_rad)
+
+    return v_cmd, w_cmd

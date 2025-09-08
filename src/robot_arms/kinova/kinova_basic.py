@@ -23,7 +23,7 @@ from kortex_api.RouterClient import RouterClientSendOptions
 from solvers.curobo_solver import CuRoboIKSolver
 from robot_arms.kinova.kinova_device_connection import DeviceConnection
 from kortex_api.Exceptions.KServerException import KServerException
-from controllers.simple_controller import resolved_rate_motion_control, so3_log
+from controllers.simple_controller import resolved_rate_motion_control, so3_log, ee_p_control
 
 # 尝试导入PyLibRM夹爪库
 try:
@@ -353,8 +353,11 @@ class Kinova:
             self.set_ee_pose_curobo(trans_local, quat_local, asynchronous)
         else:
             # self.ee_move(trans_local, quat_local, asynchronous)
-            self.ee_move_ik(trans_local, quat_local)
-
+            if not asynchronous:
+                self.ee_move_ik(trans_local, quat_local)
+            else:
+                self.ee_move_p_control(trans_local, quat_local)
+                
         trans_lib, quat_lib, _ = self.get_ee_pose(frame='local')
         print('[kinova] target reached', trans_lib, quat_lib)
 
@@ -646,6 +649,27 @@ class Kinova:
         
         return joint_torque[:7]
     
+    def ee_move_p_control(self, trans_target, quat_target):
+        trans_current, quat_current, _ = self.get_ee_pose(frame='local')
+        v_cmd, w_cmd = ee_p_control(trans_current, quat_current, trans_target, quat_target)
+        print(w_cmd)
+
+        command = Base_pb2.TwistCommand()
+
+        command.reference_frame = Base_pb2.CARTESIAN_REFERENCE_FRAME_BASE
+        # command.duration = 0
+
+        twist = command.twist
+        twist.linear_x = v_cmd[0]
+        twist.linear_y = v_cmd[1]
+        twist.linear_z = v_cmd[2]
+        twist.angular_x = w_cmd[0]
+        twist.angular_y = w_cmd[1]
+        twist.angular_z = w_cmd[2]
+
+        print ("Sending the twist command for 5 seconds...")
+        self.base.SendTwistCommand(command)
+
     def ee_move_ik(self, trans, quat):
         """
         Compute IK using kinova lib and move to the target pose.
@@ -661,16 +685,16 @@ class Kinova:
             joint_angle.joint_identifier = joint_id
             joint_angle.value = angle.value
 
-        # e = threading.Event()
-        # notification_handle = self.base.OnNotificationActionTopic(
-        #     check_for_end_or_abort(e),
-        #     Base_pb2.NotificationOptions()
-        # )
+        e = threading.Event()
+        notification_handle = self.base.OnNotificationActionTopic(
+            check_for_end_or_abort(e),
+            Base_pb2.NotificationOptions()
+        )
         # print(f"[Kinova] 移动到关节角: {joint_pose}")
         self.base.ExecuteAction(action)
         
-        # finished = e.wait(0.1)
-        # self.base.Unsubscribe(notification_handle)    
+        finished = e.wait(20)
+        self.base.Unsubscribe(notification_handle)    
 
     def ee_move_RRMC(self, trans_target, quat_target):
         """
