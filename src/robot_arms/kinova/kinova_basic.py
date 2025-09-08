@@ -20,11 +20,11 @@ from kortex_api.autogen.client_stubs.ActuatorCyclicClientRpc import ActuatorCycl
 from kortex_api.autogen.client_stubs.ControlConfigClientRpc import ControlConfigClient
 from kortex_api.autogen.messages import Base_pb2, BaseCyclic_pb2, ActuatorConfig_pb2, ControlConfig_pb2
 from kortex_api.RouterClient import RouterClientSendOptions
-from solvers.curobo_solver import CuRoboIKSolver
-from robot_arms.kinova.kinova_device_connection import DeviceConnection
+# from src.solvers.curobo_solver import CuRoboIKSolver
+from src.robot_arms.kinova.kinova_device_connection import DeviceConnection
 from kortex_api.Exceptions.KServerException import KServerException
-from controllers.simple_controller import resolved_rate_motion_control, so3_log
-
+from src.controllers.simple_controller import resolved_rate_motion_control, so3_log, ee_p_control
+import pdb
 # 尝试导入PyLibRM夹爪库
 try:
     from pylibrm import RMAxis
@@ -144,7 +144,7 @@ class Kinova:
             except Exception as e:
                 print(f"[Kinova] 夹爪连接失败: {e}")
                 self.gripper = None
-        self.ik_solver = CuRoboIKSolver('kinova', use_cuda_graph=True)
+        # self.ik_solver = CuRoboIKSolver('kinova', use_cuda_graph=True)
         print("[Kinova] 机械臂连接成功")
 
 
@@ -358,49 +358,49 @@ class Kinova:
         trans_lib, quat_lib, _ = self.get_ee_pose(frame='local')
         print('[kinova] target reached', trans_lib, quat_lib)
 
-    def corrected_target(self, trans_target, quat_target):
-        # Current FK and measured EE
-        lib_joint = self.get_joint_pose()
-        fk_ee_trans, fk_ee_quat = self.ik_solver.forward_kinematics(lib_joint)
-        lib_ee_trans, lib_ee_quat, _ = self.get_ee_pose(frame='local')
-        print("[Kinova] Lib:", lib_ee_trans, lib_ee_quat)
-        print("[Kinova] FK:", fk_ee_trans, fk_ee_quat)
+    # def corrected_target(self, trans_target, quat_target):
+    #     # Current FK and measured EE
+    #     lib_joint = self.get_joint_pose()
+    #     fk_ee_trans, fk_ee_quat = self.ik_solver.forward_kinematics(lib_joint)
+    #     lib_ee_trans, lib_ee_quat, _ = self.get_ee_pose(frame='local')
+    #     print("[Kinova] Lib:", lib_ee_trans, lib_ee_quat)
+    #     print("[Kinova] FK:", fk_ee_trans, fk_ee_quat)
 
-        # Compute translation error (measured - FK)
-        trans_diff = lib_ee_trans - fk_ee_trans.cpu().numpy()
-        print("[Kinova] translation shift:", trans_diff)
+    #     # Compute translation error (measured - FK)
+    #     trans_diff = lib_ee_trans - fk_ee_trans.cpu().numpy()
+    #     print("[Kinova] translation shift:", trans_diff)
 
-        # Apply translation correction to the target
-        trans_cmd = trans_target + trans_diff[0]
+    #     # Apply translation correction to the target
+    #     trans_cmd = trans_target + trans_diff[0]
 
-        # orrect rotation by comparing quaternions:
-        rot_fk = Rotation.from_quat(fk_ee_quat.cpu().numpy())
-        rot_ms = Rotation.from_quat(lib_ee_quat)
-        rot_err = rot_ms * rot_fk.inv()
-        quat_cmd = (rot_err.inv() * Rotation.from_quat(quat_target)).as_quat()
-        # quat_cmd = quat_target 
-        return trans_cmd, quat_cmd
+    #     # orrect rotation by comparing quaternions:
+    #     rot_fk = Rotation.from_quat(fk_ee_quat.cpu().numpy())
+    #     rot_ms = Rotation.from_quat(lib_ee_quat)
+    #     rot_err = rot_ms * rot_fk.inv()
+    #     quat_cmd = (rot_err.inv() * Rotation.from_quat(quat_target)).as_quat()
+    #     # quat_cmd = quat_target 
+    #     return trans_cmd, quat_cmd
 
-    def set_ee_pose_curobo(self, trans_local, quat_local, asynchronous=True):
-        """
-        控制机器人运动到指定末端位姿。
+    # def set_ee_pose_curobo(self, trans_local, quat_local, asynchronous=True):
+    #     """
+    #     控制机器人运动到指定末端位姿。
         
-        参数：
-            translation (list/np.ndarray): 3维位置
-            quaternion (list/np.ndarray): 4维四元数
-            asynchronous (bool): 是否异步执行
-            frame (str): 'global'或'local'，指定输入位姿的参考系
-        """
-        # print('[kinova] target set', trans_local, quat_local)
-        # solving ik using cuRobo
-        current_q = self.get_joint_pose()
-        # trans_corrected, quat_corrected = self.corrected_target(trans_local, quat_local)
-        # q_target = self.ik_solver.get_target_joint(current_q, trans_corrected, quat_corrected)
-        q_target = self.ik_solver.get_target_joint(current_q, trans_local, quat_local)
+    #     参数：
+    #         translation (list/np.ndarray): 3维位置
+    #         quaternion (list/np.ndarray): 4维四元数
+    #         asynchronous (bool): 是否异步执行
+    #         frame (str): 'global'或'local'，指定输入位姿的参考系
+    #     """
+    #     # print('[kinova] target set', trans_local, quat_local)
+    #     # solving ik using cuRobo
+    #     current_q = self.get_joint_pose()
+    #     # trans_corrected, quat_corrected = self.corrected_target(trans_local, quat_local)
+    #     # q_target = self.ik_solver.get_target_joint(current_q, trans_corrected, quat_corrected)
+    #     q_target = self.ik_solver.get_target_joint(current_q, trans_local, quat_local)
 
-        self.set_joint_pose(q_target, asynchronous=asynchronous)
-        # trans_lib, quat_lib, _ = self.get_ee_pose(frame='local')
-        # print('[kinova] target reached', trans_lib, quat_lib)
+    #     self.set_joint_pose(q_target, asynchronous=asynchronous)
+    #     # trans_lib, quat_lib, _ = self.get_ee_pose(frame='local')
+    #     # print('[kinova] target reached', trans_lib, quat_lib)
 
     def set_joint_pose(self, joint_pose, asynchronous=False):
         """
@@ -677,21 +677,50 @@ class Kinova:
         Simple resolved-rate motion control (RRMC) that moves the end-effector to the target pose linearly.
         """
         trans_current, quat_current, _ = self.get_ee_pose(frame='local')
-        p_cur = np.array([trans_current[0], trans_current[1], trans_current[2]])
-        R_cur = Rotation.from_quat(quat_current).as_matrix()
+        # p_cur = np.array([trans_current[0], trans_current[1], trans_current[2]])
+        # R_cur = Rotation.from_quat(quat_current).as_matrix()
 
         p_des = np.array([trans_target[0], trans_target[1], trans_target[2]])
         R_des = Rotation.from_quat(quat_target).as_matrix()
 
-        q = self.get_joint_pose()
-        J = self.compute_jacobian_numeric(q)
+        # q = self.get_joint_pose()
+        # J = self.compute_jacobian_numeric(q)
         # control loop in 10Hz
-        while trans_error > trans_threshold and rot_error > rot_threshold:
-            q_v, _ = resolved_rate_motion_control(q, J, p_cur, R_cur, p_des, R_des)
+        # 阈值（可调）
+        trans_threshold = 1e-2# 1 mm
+        rot_threshold = 1e-1   # ~0.5 deg
+
+        while True:
+        # 当前末端执行器的位姿
+            trans_current, quat_current, _ = self.get_ee_pose(frame='local')
+            print('quat_current', quat_current)
+            p_cur = np.array(trans_current)
+            R_cur = Rotation.from_quat(quat_current).as_matrix()
+
+            # 误差计算
+            trans_error = np.linalg.norm(p_des - p_cur)  # 欧氏距离
+            rot_error = so3_log(R_des @ R_cur.T)
+            rot_error = np.linalg.norm(rot_error)                      # 旋转误差矩阵
+            print('trans_error', trans_error)
+            print('rot_error', rot_error)
+
+            # 判断是否收敛
+            if trans_error < trans_threshold and rot_error < rot_threshold:
+                print('ok')
+                self.stop_motion()
+                break
+
+            # 获取关节状态和雅可比矩阵
+            q = self.get_joint_pose()
+            J = self.compute_jacobian_numeric(q)
+
+            # 计算关节速度（RRMC控制器）
+            q_v, _ = resolved_rate_motion_control(J, p_cur, R_cur, p_des, R_des)
+            print('q_v', q_v)
             self.set_joint_velocity(q_v)
-            time.sleep(0.1)
-            trans_error = ...
-            rot_error = ...
+
+            # 控制频率 10Hz
+            time.sleep(0.02)
 
     def ee_move(self, trans, quat, asynchronous=False):
         R = Rotation.from_quat(quat)
@@ -751,14 +780,111 @@ class Kinova:
 
             return finished
 
-    def forward_kinemetics(self, joint_q):
-        pose = self.base.ComputeForwardKinematics(joint_q)
-        print('trans', pose.x, pose.y, pose.z)
-        print('rotate', pose.theta_x, pose.theta_y, pose.theta_z)
+    def ee_move_p_control(self, trans_target, quat_target, asynchronous=True):
+        
+        # p_cur = np.array([trans_current[0], trans_current[1], trans_current[2]])
+        # R_cur = Rotation.from_quat(quat_current).as_matrix()
+
+        p_des = np.array([trans_target[0], trans_target[1], trans_target[2]])
+        R_des = Rotation.from_quat(quat_target).as_matrix()
+
+        # q = self.get_joint_pose()
+        # J = self.compute_jacobian_numeric(q)
+        # control loop in 10Hz
+        # 阈值（可调）
+        trans_threshold = 1e-2# 1 mm
+        rot_threshold = 1e-1   # ~0.5 deg
+        if asynchronous:
+            v_cmd, w_cmd = ee_p_control(trans_current, quat_current, trans_target, quat_target)
+            print('v_cmd', v_cmd)
+            print('w_cmd', w_cmd)
+            w_cmd = np.rad2deg(w_cmd)
+            print('w_cmd', w_cmd)
+            command = Base_pb2.TwistCommand()
+
+            command.reference_frame = Base_pb2.CARTESIAN_REFERENCE_FRAME_BASE
+            # command.duration = 0
+
+            twist = command.twist
+            twist.linear_x = v_cmd[0]
+            twist.linear_y = v_cmd[1]
+            twist.linear_z = v_cmd[2]
+            twist.angular_x = w_cmd[0]
+            twist.angular_y = w_cmd[1]
+            twist.angular_z = w_cmd[2]
+
+            # print ("Sending the twist command for 5 seconds...")
+            self.base.SendTwistCommand(command)
+        else:
+            while True:
+                trans_current, quat_current, _ = self.get_ee_pose(frame='local')
+                p_cur = np.array(trans_current)
+                R_cur = Rotation.from_quat(quat_current).as_matrix()
+
+                # 误差计算
+                trans_error = np.linalg.norm(p_des - p_cur)  # 欧氏距离
+                rot_error = so3_log(R_des @ R_cur.T)
+                rot_error = np.linalg.norm(rot_error)                      # 旋转误差矩阵
+                print('trans_error', trans_error)
+                print('rot_error', rot_error)
+
+                # 判断是否收敛
+                if trans_error < trans_threshold and rot_error < rot_threshold:
+                    print('ok')
+                    self.stop_motion()
+                    break
+                
+                v_cmd, w_cmd = ee_p_control(trans_current, quat_current, trans_target, quat_target)
+                print('v_cmd', v_cmd)
+                print('w_cmd', w_cmd)
+                w_cmd = np.rad2deg(w_cmd)
+                print('w_cmd', w_cmd)
+                command = Base_pb2.TwistCommand()
+
+                command.reference_frame = Base_pb2.CARTESIAN_REFERENCE_FRAME_BASE
+                # command.duration = 0
+
+                twist = command.twist
+                twist.linear_x = v_cmd[0]
+                twist.linear_y = v_cmd[1]
+                twist.linear_z = v_cmd[2]
+                twist.angular_x = w_cmd[0]
+                twist.angular_y = w_cmd[1]
+                twist.angular_z = w_cmd[2]
+
+                # print ("Sending the twist command for 5 seconds...")
+                self.base.SendTwistCommand(command)
+
+    def forward_kinematics(self, joint_angles):
+        """
+        正运动学：根据关节角计算末端位姿。
+        参数：
+            joint_angles (list[float]): 长度为7的关节角度列表（度）。
+        返回：
+            tuple: (x, y, z, theta_x, theta_y, theta_z)
+        """
+        # pdb.set_trace()
+        if not isinstance(joint_angles, (list, tuple, np.ndarray)) or len(joint_angles) != 7:
+            raise ValueError("joint_angles 必须为长度为7的列表或元组")
+        from kortex_api.autogen.messages import Base_pb2
+        # print('joint_angles', joint_angles)
+        joint_angles = np.rad2deg(joint_angles)
+        joint_angles = [(angle + 360) % 360 for angle in joint_angles]
+        print('joint_angles', joint_angles)
+
+        joint_angles_msg = Base_pb2.JointAngles()
+        for idx, angle in enumerate(joint_angles):
+            joint_angle = joint_angles_msg.joint_angles.add()
+            joint_angle.joint_identifier = idx
+            joint_angle.value = angle
+        pose = self.base.ComputeForwardKinematics(joint_angles_msg)
+        # print('trans', pose.x, pose.y, pose.z)
+        # print('rotate', pose.theta_x, pose.theta_y, pose.theta_z)
         R_matrix = Rotation.from_euler('xyz', [pose.theta_x, pose.theta_y, pose.theta_z]).as_matrix()
         translation = np.array([pose.x, pose.y, pose.z])
         # rotation = np.array([pose.theta_x, pose.theta_y, pose.theta_z])
         rotation = R_matrix
+
         return translation, rotation
 
     def inverse_kinematics(self, trans, quat):
@@ -806,29 +932,31 @@ class Kinova:
         """
         n = len(q)
         J = np.zeros((6, n))
-        p0, R0 = fk(q)
+        p0, R0 = self.forward_kinematics(q)
         for i in range(n):
             dq = np.zeros_like(q); dq[i] = h
-            p_plus,  R_plus  = fk(q + dq)
-            p_minus, R_minus = fk(q - dq)
+            p_plus,  R_plus  = self.forward_kinematics(q + dq)
+            p_minus, R_minus = self.forward_kinematics(q - dq)
             # linear part
             J[0:3, i] = (p_plus - p_minus) / (2*h)
             # angular part: local logs around current pose to reduce bias
             w_plus  = so3_log(R_plus  @ R0.T)
             w_minus = so3_log(R_minus @ R0.T)
             J[3:6, i] = (w_plus - w_minus) / (2*h)
+        print('J', J)
+        time.sleep(0.05)
         return J
 
-    def check_fk(self):
-        current_q = self.get_joint_pose()
-        fk_ee_trans, fk_ee_quat = self.ik_solver.forward_kinematics(current_q)
-        lib_ee_trans, lib_ee_quat, lib_ee_rpy = self.get_ee_pose(frame='local')
+    # def check_fk(self):
+    #     current_q = self.get_joint_pose()
+    #     fk_ee_trans, fk_ee_quat = self.ik_solver.forward_kinematics(current_q)
+    #     lib_ee_trans, lib_ee_quat, lib_ee_rpy = self.get_ee_pose(frame='local')
 
-        input_joint_angles = self.base.GetMeasuredJointAngles()
-        self.forward_kinemetics(input_joint_angles)
+    #     input_joint_angles = self.base.GetMeasuredJointAngles()
+    #     self.forward_kinematics(input_joint_angles)
 
-        print('FK:', fk_ee_trans, fk_ee_quat)
-        print('lib:', lib_ee_trans, lib_ee_quat)
+    #     print('FK:', fk_ee_trans, fk_ee_quat)
+    #     print('lib:', lib_ee_trans, lib_ee_quat)
 
     def stop_motion(self):
         """
@@ -842,3 +970,34 @@ class Kinova:
             print(f"[Kinova] 停止机械臂运动失败: {e}")
             return False
 
+
+    def set_joint_velocity(self, joint_velocities):
+        """
+        发送关节速度控制命令。
+
+        参数：
+            joint_velocities (list/tuple/np.ndarray): 7个关节的速度值（单位: rad/s 或 deg/s, 
+                                                     取决于 Kinova API 的配置）。
+        """
+        import numbers
+
+        # --- 输入检查 ---
+        if not isinstance(joint_velocities, (list, tuple, np.ndarray)):
+            raise TypeError("joint_velocities must be a list, tuple, or numpy array")
+        if len(joint_velocities) != 7:
+            raise ValueError("joint_velocities must contain exactly 7 values")
+        if not all(isinstance(v, numbers.Number) for v in joint_velocities):
+            raise ValueError("all elements in joint_velocities must be numeric")
+
+        # --- 构造 JointSpeeds 消息 ---
+        joint_velocities = np.rad2deg(joint_velocities)
+        print('joint_velocities', joint_velocities)
+        joint_speeds = Base_pb2.JointSpeeds()
+        for i, v in enumerate(joint_velocities):
+            joint_speed = joint_speeds.joint_speeds.add()
+            joint_speed.joint_identifier = i
+            joint_speed.value = float(v)  # 转 float
+            # joint_speed.duration = 0      # 0 表示持续直到下一条命令
+
+        # --- 发送命令 ---
+        self.base.SendJointSpeedsCommand(joint_speeds)

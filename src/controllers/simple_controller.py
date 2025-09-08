@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
 def so3_log(R):
     """Log map: SO(3) -> R^3 (rotation vector), numerically stable near 0."""
@@ -76,7 +77,7 @@ def slew_limit(qdot, qdot_prev, a_max, dt):
 
 # ========= main control tick =========
 def resolved_rate_motion_control(
-    fk_function, q, p_des, R_des, # -> q, J, p_cur, R_cur, p_des, R_des    , R_des and R_cur are rotation matrices
+    J, p_cur, R_cur, p_des, R_des, # -> J, p_cur, R_cur, p_des, R_des    , R_des and R_cur are rotation matrices
     # 10 Hz tuned gains and caps:
     k_p=0.6,           # m/s per m error
     k_w=1.2,           # rad/s per rad error
@@ -84,7 +85,7 @@ def resolved_rate_motion_control(
     w_cap=0.8,         # max EE angular speed (rad/s)
     lam=0.08,          # DLS damping
     h=1e-5,            # FD step (rad)
-    qdot_limits=None,  # list/array of per-joint rad/s caps, e.g., 0.8
+    qdot_limits=[5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],  # list/array of per-joint rad/s caps, e.g., 0.8
     qdot_prev=None,    # previous commanded qdot
     a_max=None,        # per-joint accel cap (rad/s^2), e.g., 3.0
     dt=0.1             # control period (s) for 10 Hz
@@ -96,5 +97,32 @@ def resolved_rate_motion_control(
 
     # scale joint velocity to respect limits
     qdot = clamp_joint_vel(qdot, qdot_limits)
+    # qdot = qdot * 2
+
     # qdot = slew_limit(qdot, qdot_prev, a_max, dt)
     return qdot, v_ee
+
+def ee_p_control(trans_current, quat_current, trans_target, quat_target, kp=1.0, kw=1.0, v_max=0.2, w_max=10.0):
+    # --- Position control (P) ---
+    p_cur = np.asarray(trans_current, dtype=float).reshape(3)
+    p_tgt = np.asarray(trans_target, dtype=float).reshape(3)
+    pos_err = p_tgt - p_cur                         # [m]
+    v_cmd = kp * pos_err                            # [m/s]
+    # v_cmd = _saturate(v_cmd, v_max)
+
+    # --- Orientation control (P on rotation vector) ---
+    # Build rotations (SciPy expects quaternion in (x,y,z,w) order)
+    R_cur = R.from_quat(np.asarray(quat_current, dtype=float))
+    R_tgt = R.from_quat(np.asarray(quat_target, dtype=float))
+
+    # Rotation that takes current to target
+    R_err = R_tgt * R_cur.inv()
+    # Rotation vector (axis * angle), in radians
+    rotvec = R_err.as_rotvec()                      # [rad] direction * angle
+    w_cmd = kw * rotvec                             # [rad/s]
+
+    # # Saturate angular speed by magnitude (convert limit deg/s -> rad/s)
+    # w_max_rad = np.deg2rad(float(w_max))
+    # w_cmd = _saturate(w_cmd, w_max_rad)
+
+    return v_cmd, w_cmd
