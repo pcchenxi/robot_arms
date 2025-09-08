@@ -20,8 +20,10 @@ from kortex_api.autogen.client_stubs.ActuatorCyclicClientRpc import ActuatorCycl
 from kortex_api.autogen.client_stubs.ControlConfigClientRpc import ControlConfigClient
 from kortex_api.autogen.messages import Base_pb2, BaseCyclic_pb2, ActuatorConfig_pb2, ControlConfig_pb2
 from kortex_api.RouterClient import RouterClientSendOptions
-from robot_arms.solvers.curobo_solver import CuRoboIKSolver
+from solvers.curobo_solver import CuRoboIKSolver
 from robot_arms.kinova.kinova_device_connection import DeviceConnection
+from kortex_api.Exceptions.KServerException import KServerException
+from controllers.simple_controller import resolved_rate_motion_control, so3_log
 
 # 尝试导入PyLibRM夹爪库
 try:
@@ -32,8 +34,8 @@ except ImportError:
     GRIPPER_AVAILABLE = False
 
 # 默认动作等待超时时间（秒）
-TIMEOUT_DURATION = 20
-
+TIMEOUT_DURATION_EE = 0.5
+TIMEOUT_DURATION_JOINT = 20
 
 def check_for_end_or_abort(e):
     """
@@ -58,7 +60,7 @@ class Kinova:
     """
     
     def __init__(self, robot_ip="192.168.31.13", port=10000, relative_dynamics_factor=0.05, 
-                 gripper_port="/dev/ttyUSB0", gripper_baudrate=115200, gripper_slave_id=1, control_mode='curobo'):
+                 gripper_port="/dev/ttyUSB0", gripper_baudrate=115200, gripper_slave_id=1, control_mode='lib'):
         """
         初始化Kinova机械臂对象。
         
@@ -106,12 +108,12 @@ class Kinova:
         
         # 设置发送选项
         self.sendOption = RouterClientSendOptions()
-        self.sendOption.andForget = False
-        self.sendOption.delay_ms = 0
-        self.sendOption.timeout_ms = 3
+        # self.sendOption.andForget = False
+        # self.sendOption.delay_ms = 0
+        self.sendOption.timeout_ms = 1000000
         
         # 设置默认超时时间
-        self.timeout_duration = TIMEOUT_DURATION
+        # self.timeout_duration = TIMEOUT_DURATION
         
         self.pose_translate = np.array([0, 0, 0])
         self.pose_rotate = np.array([0, 0, 0, 1])
@@ -234,7 +236,7 @@ class Kinova:
         """
         print("[Kinova] 移动到默认姿态")
         # self.set_joint_pose(self.home_joint_pose)
-        self.set_joint_pose(self.start_joint_pose)
+        self.set_joint_pose(self.start_joint_pose, asynchronous=False)
     
     def open_gripper(self, asynchronous=True):
         """
@@ -320,7 +322,7 @@ class Kinova:
             if width > 0.01:
                 width = 0.04
             else:
-                width = 0.0
+                width = 0.002
 
             if abs(current_width - width) > 0.01:
                 # 使用绝对运动到指定位置
@@ -346,10 +348,15 @@ class Kinova:
         else:
             trans_local, quat_local = translation, quaternion
 
+        print('[kinova] target set', trans_local, quat_local)
         if self.control_mode == 'curobo':
             self.set_ee_pose_curobo(trans_local, quat_local, asynchronous)
         else:
-            self.ee_move(trans_local, quat_local, asynchronous)
+            # self.ee_move(trans_local, quat_local, asynchronous)
+            self.ee_move_ik(trans_local, quat_local)
+
+        trans_lib, quat_lib, _ = self.get_ee_pose(frame='local')
+        print('[kinova] target reached', trans_lib, quat_lib)
 
     def corrected_target(self, trans_target, quat_target):
         # Current FK and measured EE
@@ -361,7 +368,7 @@ class Kinova:
 
         # Compute translation error (measured - FK)
         trans_diff = lib_ee_trans - fk_ee_trans.cpu().numpy()
-        # print("[Kinova] translation shift:", trans_diff)
+        print("[Kinova] translation shift:", trans_diff)
 
         # Apply translation correction to the target
         trans_cmd = trans_target + trans_diff[0]
@@ -384,7 +391,7 @@ class Kinova:
             asynchronous (bool): 是否异步执行
             frame (str): 'global'或'local'，指定输入位姿的参考系
         """
-        print('[kinova] target set', trans_local, quat_local)
+        # print('[kinova] target set', trans_local, quat_local)
         # solving ik using cuRobo
         current_q = self.get_joint_pose()
         # trans_corrected, quat_corrected = self.corrected_target(trans_local, quat_local)
@@ -392,8 +399,8 @@ class Kinova:
         q_target = self.ik_solver.get_target_joint(current_q, trans_local, quat_local)
 
         self.set_joint_pose(q_target, asynchronous=asynchronous)
-        trans_lib, quat_lib, _ = self.get_ee_pose(frame='local')
-        print('[kinova] target reached', trans_lib, quat_lib)
+        # trans_lib, quat_lib, _ = self.get_ee_pose(frame='local')
+        # print('[kinova] target reached', trans_lib, quat_lib)
 
     def set_joint_pose(self, joint_pose, asynchronous=False):
         """
@@ -435,11 +442,11 @@ class Kinova:
             # print(f"[Kinova] 移动到关节角: {joint_pose}")
             self.base.ExecuteAction(action)
             
-            finished = e.wait(self.timeout_duration)
+            finished = e.wait(TIMEOUT_DURATION_JOINT)
             self.base.Unsubscribe(notification_handle)            
-            # current_q = self.get_joint_pose()
-            # print('[Kinova] q target:', joint_pose)
-            # print('[Kinova] q reached:', current_q)
+            current_q = self.get_joint_pose()
+            print('[Kinova] q target:', joint_pose)
+            print('[Kinova] q reached:', current_q)
 
             return finished
         else:
@@ -486,7 +493,7 @@ class Kinova:
             print(f"[Kinova] 执行关节轨迹，路点数: {len(joint_trajectory)}")
             self.base.ExecuteWaypointTrajectory(waypoints)
             
-            finished = e.wait(self.timeout_duration * len(joint_trajectory))
+            finished = e.wait(TIMEOUT_DURATION_JOINT * len(joint_trajectory))
             self.base.Unsubscribe(notification_handle)
             
             if finished:
@@ -639,9 +646,61 @@ class Kinova:
         
         return joint_torque[:7]
     
+    def ee_move_ik(self, trans, quat):
+        """
+        Compute IK using kinova lib and move to the target pose.
+        """        
+        computed_joint_angles = self.inverse_kinematics(trans, quat)
+
+        action = Base_pb2.Action()
+        action.name = "Set Joint Pose"
+        action.application_data = ""
+        
+        for joint_id, angle in enumerate(computed_joint_angles.joint_angles):
+            joint_angle = action.reach_joint_angles.joint_angles.joint_angles.add()
+            joint_angle.joint_identifier = joint_id
+            joint_angle.value = angle.value
+
+        # e = threading.Event()
+        # notification_handle = self.base.OnNotificationActionTopic(
+        #     check_for_end_or_abort(e),
+        #     Base_pb2.NotificationOptions()
+        # )
+        # print(f"[Kinova] 移动到关节角: {joint_pose}")
+        self.base.ExecuteAction(action)
+        
+        # finished = e.wait(0.1)
+        # self.base.Unsubscribe(notification_handle)    
+
+    def ee_move_RRMC(self, trans_target, quat_target):
+        """
+        Simple resolved-rate motion control (RRMC) that moves the end-effector to the target pose linearly.
+        """
+        trans_current, quat_current, _ = self.get_ee_pose(frame='local')
+        p_cur = np.array([trans_current[0], trans_current[1], trans_current[2]])
+        R_cur = Rotation.from_quat(quat_current).as_matrix()
+
+        p_des = np.array([trans_target[0], trans_target[1], trans_target[2]])
+        R_des = Rotation.from_quat(quat_target).as_matrix()
+
+        q = self.get_joint_pose()
+        J = self.compute_jacobian_numeric(q)
+        # control loop in 10Hz
+        while trans_error > trans_threshold and rot_error > rot_threshold:
+            q_v, _ = resolved_rate_motion_control(q, J, p_cur, R_cur, p_des, R_des)
+            self.set_joint_velocity(q_v)
+            time.sleep(0.1)
+            trans_error = ...
+            rot_error = ...
+
     def ee_move(self, trans, quat, asynchronous=False):
         R = Rotation.from_quat(quat)
         euler = R.as_euler('xyz', degrees=True)
+
+        base_servo_mode = Base_pb2.ServoingModeInformation()
+        base_servo_mode.servoing_mode = Base_pb2.SINGLE_LEVEL_SERVOING
+        self.base.SetServoingMode(base_servo_mode)
+
         action = Base_pb2.Action()
         action.name = "Example Cartesian action movement"
         action.application_data = ""
@@ -668,25 +727,105 @@ class Kinova:
             or notification.action_event == Base_pb2.ACTION_ABORT:
                 e.set()
 
-        notification_handle = self.base.OnNotificationActionTopic(
-            concise_check,
-            Base_pb2.NotificationOptions()
-        )
         if asynchronous:
+            # notification_handle = self.base.OnNotificationActionTopic(
+            #     concise_check,
+            #     Base_pb2.NotificationOptions()
+            # )
             self.base.ExecuteAction(action)
             return True
         else:
-            self.base.ExecuteAction(action)
+            finished = False
+            while not finished:
+                notification_handle = self.base.OnNotificationActionTopic(
+                    concise_check,
+                    Base_pb2.NotificationOptions()
+                )                
+                self.base.ExecuteAction(action)
 
-            finished = e.wait(self.timeout_duration)
-            self.base.Unsubscribe(notification_handle)
+                finished = e.wait(TIMEOUT_DURATION_EE)
+                self.base.Unsubscribe(notification_handle)
+
+            print('[Kinova ee move result]', finished, TIMEOUT_DURATION_EE)
+            print('[Kinova ee move]', cartesian_pose)
 
             return finished
+
+    def forward_kinemetics(self, joint_q):
+        pose = self.base.ComputeForwardKinematics(joint_q)
+        print('trans', pose.x, pose.y, pose.z)
+        print('rotate', pose.theta_x, pose.theta_y, pose.theta_z)
+        R_matrix = Rotation.from_euler('xyz', [pose.theta_x, pose.theta_y, pose.theta_z]).as_matrix()
+        translation = np.array([pose.x, pose.y, pose.z])
+        # rotation = np.array([pose.theta_x, pose.theta_y, pose.theta_z])
+        rotation = R_matrix
+        return translation, rotation
+
+    def inverse_kinematics(self, trans, quat):
+        # Object containing cartesian coordinates and Angle Guess
+        input_IkData = Base_pb2.IKData()
+        
+        # Fill the IKData Object with the cartesian coordinates that need to be converted
+        R = Rotation.from_quat(quat)
+        euler = R.as_euler('xyz', degrees=True)
+        input_IkData.cartesian_pose.x = trans[0]
+        input_IkData.cartesian_pose.y = trans[1]
+        input_IkData.cartesian_pose.z = trans[2]
+        input_IkData.cartesian_pose.theta_x = euler[0]
+        input_IkData.cartesian_pose.theta_y = euler[1]
+        input_IkData.cartesian_pose.theta_z = euler[2]
+
+        # Fill the IKData Object with the guessed joint angles
+        input_joint_angles = self.base.GetMeasuredJointAngles()
+        for joint_angle in input_joint_angles.joint_angles :
+            jAngle = input_IkData.guess.joint_angles.add()
+            # '- 1' to generate an actual "guess" for current joint angles
+            jAngle.value = joint_angle.value - 1
+        
+        try:
+            print("Computing Inverse Kinematics using joint angles and pose...")
+            computed_joint_angles = self.base.ComputeInverseKinematics(input_IkData)
+        except KServerException as ex:
+            print("Unable to compute inverse kinematics")
+            print("Error_code:{} , Sub_error_code:{} ".format(ex.get_error_code(), ex.get_error_sub_code()))
+            print("Caught expected error: {}".format(ex))
+            return False
+
+        print("Joint ID : Joint Angle")
+        joint_identifier = 0
+        for joint_angle in computed_joint_angles.joint_angles :
+            print(joint_identifier, " : ", joint_angle.value)
+            joint_identifier += 1
+
+        return computed_joint_angles
+
+    def compute_jacobian_numeric(self, q, h=1e-5):
+        """
+        Builds a 6 x n spatial Jacobian by central-differencing FK.
+        fk(q) must return (p (3,), R (3x3)) in the world frame.
+        """
+        n = len(q)
+        J = np.zeros((6, n))
+        p0, R0 = fk(q)
+        for i in range(n):
+            dq = np.zeros_like(q); dq[i] = h
+            p_plus,  R_plus  = fk(q + dq)
+            p_minus, R_minus = fk(q - dq)
+            # linear part
+            J[0:3, i] = (p_plus - p_minus) / (2*h)
+            # angular part: local logs around current pose to reduce bias
+            w_plus  = so3_log(R_plus  @ R0.T)
+            w_minus = so3_log(R_minus @ R0.T)
+            J[3:6, i] = (w_plus - w_minus) / (2*h)
+        return J
 
     def check_fk(self):
         current_q = self.get_joint_pose()
         fk_ee_trans, fk_ee_quat = self.ik_solver.forward_kinematics(current_q)
         lib_ee_trans, lib_ee_quat, lib_ee_rpy = self.get_ee_pose(frame='local')
+
+        input_joint_angles = self.base.GetMeasuredJointAngles()
+        self.forward_kinemetics(input_joint_angles)
 
         print('FK:', fk_ee_trans, fk_ee_quat)
         print('lib:', lib_ee_trans, lib_ee_quat)

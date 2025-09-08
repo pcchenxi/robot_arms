@@ -3,7 +3,7 @@ from scipy.spatial.transform import Rotation
 from franky import Robot, Gripper, Measure
 from franky import Affine, JointWaypointMotion, JointWaypoint, JointMotion, CartesianMotion, ReferenceType, JointState, CartesianWaypointMotion, CartesianWaypoint
 import numpy as np
-from robot_arms.solvers.curobo_solver import CuRoboIKSolver
+from solvers.curobo_solver import CuRoboIKSolver
 
 
 class Franka:
