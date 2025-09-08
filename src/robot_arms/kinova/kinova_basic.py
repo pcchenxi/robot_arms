@@ -457,6 +457,39 @@ class Kinova:
             self.base.ExecuteAction(action)
             return True
     
+
+    def set_joint_velocity(self, joint_velocities):
+        """
+        发送关节速度控制命令。
+
+        参数：
+            joint_velocities (list/tuple/np.ndarray): 7个关节的速度值（单位: rad/s 或 deg/s, 
+                                                     取决于 Kinova API 的配置）。
+        """
+        import numbers
+
+        # --- 输入检查 ---
+        if not isinstance(joint_velocities, (list, tuple, np.ndarray)):
+            raise TypeError("joint_velocities must be a list, tuple, or numpy array")
+        if len(joint_velocities) != 7:
+            raise ValueError("joint_velocities must contain exactly 7 values")
+        if not all(isinstance(v, numbers.Number) for v in joint_velocities):
+            raise ValueError("all elements in joint_velocities must be numeric")
+
+        # --- 构造 JointSpeeds 消息 ---
+        joint_velocities = np.rad2deg(joint_velocities)
+        print('joint_velocities', joint_velocities)
+        joint_speeds = Base_pb2.JointSpeeds()
+        for i, v in enumerate(joint_velocities):
+            joint_speed = joint_speeds.joint_speeds.add()
+            joint_speed.joint_identifier = i
+            joint_speed.value = float(v)  # 转 float
+            # joint_speed.duration = 0      # 0 表示持续直到下一条命令
+
+        # --- 发送命令 ---
+        self.base.SendJointSpeedsCommand(joint_speeds)
+
+
     def set_joint_trajectories(self, joint_trajectory, velocity_trajectory=None, asynchronous=False):
         """
         执行关节空间轨迹。
@@ -650,25 +683,74 @@ class Kinova:
         return joint_torque[:7]
     
     def ee_move_p_control(self, trans_target, quat_target):
-        trans_current, quat_current, _ = self.get_ee_pose(frame='local')
-        v_cmd, w_cmd = ee_p_control(trans_current, quat_current, trans_target, quat_target)
-        print(w_cmd)
+        # trans_current, quat_current, _ = self.get_ee_pose(frame='local')
+        p_des = np.array([trans_target[0], trans_target[1], trans_target[2]])
+        R_des = Rotation.from_quat(quat_target).as_matrix()
+        trans_threshold = 1e-2# 1 mm
+        rot_threshold = 1.0   # degree
 
-        command = Base_pb2.TwistCommand()
+        while True:
+            trans_current, quat_current, _ = self.get_ee_pose(frame='local')
+            p_cur = np.array(trans_current)
+            R_cur = Rotation.from_quat(quat_current).as_matrix()
 
-        command.reference_frame = Base_pb2.CARTESIAN_REFERENCE_FRAME_BASE
-        # command.duration = 0
+            # 误差计算
+            trans_error = np.linalg.norm(p_des - p_cur)  # 欧氏距离
+            rot_error = so3_log(R_des @ R_cur.T)
+            rot_error = np.linalg.norm(rot_error)
+            rot_error_deg = np.degrees(rot_error)
 
-        twist = command.twist
-        twist.linear_x = v_cmd[0]
-        twist.linear_y = v_cmd[1]
-        twist.linear_z = v_cmd[2]
-        twist.angular_x = w_cmd[0]
-        twist.angular_y = w_cmd[1]
-        twist.angular_z = w_cmd[2]
+            print('trans_error', trans_error)
+            print('rot_error', rot_error_deg)
 
-        print ("Sending the twist command for 5 seconds...")
-        self.base.SendTwistCommand(command)
+            # 判断是否收敛
+            if trans_error < trans_threshold and rot_error_deg < rot_threshold:
+                print('ok')
+                self.stop_motion()
+                break
+            
+            v_cmd, w_cmd = ee_p_control(trans_current, quat_current, trans_target, quat_target)
+            print('v_cmd', v_cmd)
+            print('w_cmd', w_cmd)
+            w_cmd = np.rad2deg(w_cmd)
+            print('w_cmd', w_cmd)
+            command = Base_pb2.TwistCommand()
+
+            command.reference_frame = Base_pb2.CARTESIAN_REFERENCE_FRAME_BASE
+            # command.duration = 0
+
+            twist = command.twist
+            twist.linear_x = v_cmd[0]
+            twist.linear_y = v_cmd[1]
+            twist.linear_z = v_cmd[2]
+            twist.angular_x = w_cmd[0]
+            twist.angular_y = w_cmd[1]
+            twist.angular_z = w_cmd[2]
+
+            # print ("Sending the twist command for 5 seconds...")
+            self.base.SendTwistCommand(command)
+            time.sleep(0.02)
+
+        # v_cmd, w_cmd = ee_p_control(trans_current, quat_current, trans_target, quat_target)
+        # print('v_cmd', v_cmd)
+        # print('w_cmd', w_cmd)
+        # w_cmd = np.rad2deg(w_cmd)
+        # print('w_cmd', w_cmd)
+        # command = Base_pb2.TwistCommand()
+
+        # command.reference_frame = Base_pb2.CARTESIAN_REFERENCE_FRAME_BASE
+        # # command.duration = 0
+
+        # twist = command.twist
+        # twist.linear_x = v_cmd[0]
+        # twist.linear_y = v_cmd[1]
+        # twist.linear_z = v_cmd[2]
+        # twist.angular_x = w_cmd[0]
+        # twist.angular_y = w_cmd[1]
+        # twist.angular_z = w_cmd[2]
+
+        # # print ("Sending the twist command for 5 seconds...")
+        # self.base.SendTwistCommand(command)
 
     def ee_move_ik(self, trans, quat):
         """
@@ -696,26 +778,53 @@ class Kinova:
         finished = e.wait(20)
         self.base.Unsubscribe(notification_handle)    
 
+
     def ee_move_RRMC(self, trans_target, quat_target):
         """
         Simple resolved-rate motion control (RRMC) that moves the end-effector to the target pose linearly.
         """
         trans_current, quat_current, _ = self.get_ee_pose(frame='local')
-        p_cur = np.array([trans_current[0], trans_current[1], trans_current[2]])
-        R_cur = Rotation.from_quat(quat_current).as_matrix()
+        # p_cur = np.array([trans_current[0], trans_current[1], trans_current[2]])
+        # R_cur = Rotation.from_quat(quat_current).as_matrix()
 
         p_des = np.array([trans_target[0], trans_target[1], trans_target[2]])
         R_des = Rotation.from_quat(quat_target).as_matrix()
 
-        q = self.get_joint_pose()
-        J = self.compute_jacobian_numeric(q)
-        # control loop in 10Hz
-        while trans_error > trans_threshold and rot_error > rot_threshold:
-            q_v, _ = resolved_rate_motion_control(q, J, p_cur, R_cur, p_des, R_des)
+        trans_threshold = 1e-2 # meter
+        rot_threshold = 0.2   # degree
+
+        while True:
+        # 当前末端执行器的位姿
+            trans_current, quat_current, _ = self.get_ee_pose(frame='local')
+            print('quat_current', quat_current)
+            p_cur = np.array(trans_current)
+            R_cur = Rotation.from_quat(quat_current).as_matrix()
+
+            # 误差计算
+            trans_error = np.linalg.norm(p_des - p_cur)  # 欧氏距离
+            rot_error = so3_log(R_des @ R_cur.T)
+            rot_error = np.linalg.norm(rot_error)
+            rot_error_deg = np.degrees(rot_error)
+            print('trans_error', trans_error)
+            print('rot_error', rot_error_deg)
+
+            # 判断是否收敛
+            if trans_error < trans_threshold and rot_error_deg < rot_threshold:
+                print('ok')
+                self.stop_motion()
+                break
+
+            # 获取关节状态和雅可比矩阵
+            q = self.get_joint_pose()
+            J = self.compute_jacobian_numeric(q)
+
+            # 计算关节速度（RRMC控制器）
+            q_v, _ = resolved_rate_motion_control(J, p_cur, R_cur, p_des, R_des)
+            print('q_v', q_v)
             self.set_joint_velocity(q_v)
+
+            # 控制频率 10Hz
             time.sleep(0.1)
-            trans_error = ...
-            rot_error = ...
 
     def ee_move(self, trans, quat, asynchronous=False):
         R = Rotation.from_quat(quat)
@@ -775,15 +884,64 @@ class Kinova:
 
             return finished
 
-    def forward_kinemetics(self, joint_q):
-        pose = self.base.ComputeForwardKinematics(joint_q)
-        print('trans', pose.x, pose.y, pose.z)
-        print('rotate', pose.theta_x, pose.theta_y, pose.theta_z)
-        R_matrix = Rotation.from_euler('xyz', [pose.theta_x, pose.theta_y, pose.theta_z]).as_matrix()
+    # def forward_kinemetics(self, joint_q):
+        # pose = self.base.ComputeForwardKinematics(joint_q)
+        # print('trans', pose.x, pose.y, pose.z)
+        # print('rotate', pose.theta_x, pose.theta_y, pose.theta_z)
+        # R_matrix = Rotation.from_euler('xyz', [pose.theta_x, pose.theta_y, pose.theta_z]).as_matrix()
+        # translation = np.array([pose.x, pose.y, pose.z])
+        # # rotation = np.array([pose.theta_x, pose.theta_y, pose.theta_z])
+        # rotation = R_matrix
+        # return translation, rotation
+    def forward_kinematics(self, joint_angles):
+        """
+        正运动学：根据关节角计算末端位姿。
+        参数：
+            joint_angles (list[float]): 长度为7的关节角度列表（度）。
+        返回：
+            tuple: (x, y, z, theta_x, theta_y, theta_z)
+        """
+        # pdb.set_trace()
+        if not isinstance(joint_angles, (list, tuple, np.ndarray)) or len(joint_angles) != 7:
+            raise ValueError("joint_angles 必须为长度为7的列表或元组")
+        # from kortex_api.autogen.messages import Base_pb2
+        # print('joint_angles', joint_angles)
+        joint_angles = np.rad2deg(joint_angles)
+        joint_angles = [(angle + 360) % 360 for angle in joint_angles]
+        # print('joint_angles', joint_angles)
+
+        joint_angles_msg = Base_pb2.JointAngles()
+        for idx, angle in enumerate(joint_angles):
+            joint_angle = joint_angles_msg.joint_angles.add()
+            joint_angle.joint_identifier = idx
+            joint_angle.value = angle
+
+        # Computing Foward Kinematics (Angle -> cartesian convert) from arm's current joint angles
+        pose = None
+        while pose is None:
+            try:
+                # print("Computing Foward Kinematics using joint angles...")
+                pose = self.base.ComputeForwardKinematics(joint_angles_msg)
+            except KServerException as ex:
+                print("Unable to compute forward kinematics")
+                print("Error_code:{} , Sub_error_code:{} ".format(ex.get_error_code(), ex.get_error_sub_code()))
+                print("Caught expected error: {}".format(ex))
+                pose = None
+                time.sleep(0.1)
+
+        # print('trans', pose.x, pose.y, pose.z)
+        # print('rotate', pose.theta_x, pose.theta_y, pose.theta_z)
+
+        rotation_degree = np.array([pose.theta_x, pose.theta_y, pose.theta_z])
+        rotation_rad = np.deg2rad(rotation_degree)
+        R_matrix = Rotation.from_euler('xyz', rotation_rad).as_matrix()
         translation = np.array([pose.x, pose.y, pose.z])
         # rotation = np.array([pose.theta_x, pose.theta_y, pose.theta_z])
+
         rotation = R_matrix
+
         return translation, rotation
+
 
     def inverse_kinematics(self, trans, quat):
         # Object containing cartesian coordinates and Angle Guess
@@ -830,11 +988,11 @@ class Kinova:
         """
         n = len(q)
         J = np.zeros((6, n))
-        p0, R0 = fk(q)
+        p0, R0 = self.forward_kinematics(q)
         for i in range(n):
             dq = np.zeros_like(q); dq[i] = h
-            p_plus,  R_plus  = fk(q + dq)
-            p_minus, R_minus = fk(q - dq)
+            p_plus,  R_plus  = self.forward_kinematics(q + dq)
+            p_minus, R_minus = self.forward_kinematics(q - dq)
             # linear part
             J[0:3, i] = (p_plus - p_minus) / (2*h)
             # angular part: local logs around current pose to reduce bias

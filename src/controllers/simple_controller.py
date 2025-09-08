@@ -19,10 +19,15 @@ def so3_log(R):
 def pose_error_spatial(p_cur, R_cur, p_des, R_des, k_p, k_w, v_cap, w_cap):
     """6D desired EE twist from pose error (spatial/world frame)."""
     e_p = p_des - p_cur
-    e_w = so3_log(R_des @ R_cur.T)
+    R_err = R_des @ R_cur.T
+    e_w  = so3_log(R_err)
+    # k_p, k_w = compute_gains(e_p, e_w)
+    
     v = np.hstack([k_p * e_p, k_w * e_w])  # [vx,vy,vz, wx,wy,wz]
+    
     # cap linear & angular speeds (smoothness/safety)
-    ln = np.linalg.norm(v[:3]);  an = np.linalg.norm(v[3:])
+    ln = np.linalg.norm(v[:3])
+    an = np.linalg.norm(v[3:])
     if ln > v_cap and ln > 1e-12: v[:3] *= (v_cap / ln)
     if an > w_cap and an > 1e-12: v[3:] *= (w_cap / an)
     return v
@@ -75,51 +80,54 @@ def slew_limit(qdot, qdot_prev, a_max, dt):
     dq = np.clip(dq, -max_step, max_step)
     return qdot_prev + dq
 
+def compute_gains(e_p, e_w,
+                  k_p_min=0.3, k_p_max=1.2,
+                  k_w_min=0.3, k_w_max=1.2,
+                  pos_thresh=0.1,   # 10 cm
+                  rot_thresh=0.1):  # ~6 deg in rad
+    """
+    Compute adaptive k_p and k_w based on current errors.
+
+    e_p: np.array(3,) position error [m]
+    e_w: np.array(3,) orientation error (axis*angle) [rad]
+
+    k_*_min/k_*_max: min/max proportional gains
+    pos_thresh: error at which k_p reaches k_p_max
+    rot_thresh: error at which k_w reaches k_w_max
+    """
+    pos_err = np.linalg.norm(e_p)
+    rot_err = np.linalg.norm(e_w)
+
+    # Linearly scale gains with error, saturate at max
+    k_p = k_p_min + (k_p_max - k_p_min) * min(pos_err / pos_thresh, 1.0)
+    k_w = k_w_min + (k_w_max - k_w_min) * min(rot_err / rot_thresh, 1.0)
+
+    return k_p, k_w
+
 # ========= main control tick =========
 def resolved_rate_motion_control(
-    fk_function, q, p_des, R_des, # -> q, J, p_cur, R_cur, p_des, R_des    , R_des and R_cur are rotation matrices
+    J, p_cur, R_cur, p_des, R_des, # R_des and R_cur are 3x3 rotation matrices
     # 10 Hz tuned gains and caps:
-    k_p=0.6,           # m/s per m error
-    k_w=1.2,           # rad/s per rad error
+    k_p=0.5,           # m/s per m error
+    k_w=0.5,           # rad/s per rad error
     v_cap=0.15,        # max EE linear speed (m/s)
-    w_cap=0.8,         # max EE angular speed (rad/s)
+    w_cap=0.6,         # max EE angular speed (rad/s)
     lam=0.08,          # DLS damping
-    h=1e-5,            # FD step (rad)
-    qdot_limits=None,  # list/array of per-joint rad/s caps, e.g., 0.8
+    qdot_limits=[5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],  # list/array of per-joint rad/s caps, e.g., 0.8
     qdot_prev=None,    # previous commanded qdot
     a_max=None,        # per-joint accel cap (rad/s^2), e.g., 3.0
     dt=0.1             # control period (s) for 10 Hz
 ):
-    # p_cur, R_cur = fk_function(q)
     v_ee = pose_error_spatial(p_cur, R_cur, p_des, R_des, k_p, k_w, v_cap, w_cap)
     # J = numeric_jacobian_fk(fk_function, q, h=h)
     qdot = dls(J, v_ee, lam=lam)
 
     # scale joint velocity to respect limits
     qdot = clamp_joint_vel(qdot, qdot_limits)
+    # qdot = qdot * 2
+
     # qdot = slew_limit(qdot, qdot_prev, a_max, dt)
     return qdot, v_ee
-
-def joint_p_control(q_current, q_target, kp=1.0, qdot_limits=5.0):
-    """Simple joint-space P controller with optional velocity limits."""
-    # convert to degrees
-
-    qdot = kp * (q_target - q_current)  # joint-space proportional velocity
-
-    # Velocity and optional accel limits
-    if qdot_limits is not None:
-        scale = max(1.0, np.max(np.abs(qdot)/(np.array(qdot_limits)+1e-12)))
-        if scale > 1.0: qdot /= scale
-
-
-def _saturate(vec: np.ndarray, max_norm: float) -> np.ndarray:
-    """Scale vec to have at most max_norm (leave direction intact)."""
-    n = np.linalg.norm(vec)
-    if n <= 1e-12 or max_norm <= 0.0:
-        return np.zeros_like(vec)
-    if n > max_norm:
-        return vec * (max_norm / n)
-    return vec
 
 def ee_p_control(trans_current, quat_current, trans_target, quat_target, kp=1.0, kw=1.0, v_max=0.2, w_max=10.0):
     # --- Position control (P) ---
