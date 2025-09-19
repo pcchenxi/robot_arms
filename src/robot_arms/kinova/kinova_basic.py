@@ -121,6 +121,8 @@ class Kinova:
         # 初始化状态
         self.start_joint_pose = [0, 0, 0, 0, 0, 0, 0]  # 预设起始关节角
         self.home_joint_pose = [0, 0, 0, 0, 0, 0, 0]   # 预设Home关节角
+        self.last_torque = None
+        self.last_pos = None
         
         # 初始化夹爪
         self.gripper = None
@@ -350,16 +352,18 @@ class Kinova:
 
         print('[kinova] target set', trans_local, quat_local)
         if self.control_mode == 'curobo':
-            self.set_ee_pose_curobo(trans_local, quat_local, asynchronous)
+            result = self.set_ee_pose_curobo(trans_local, quat_local, asynchronous)
         else:
             # self.ee_move(trans_local, quat_local, asynchronous)
-            if not asynchronous:
-                self.ee_move_ik(trans_local, quat_local)
-            else:
-                self.ee_move_p_control(trans_local, quat_local)
-                
+            # if not asynchronous:
+            #     self.ee_move_ik(trans_local, quat_local)
+            # else:
+            result = self.ee_move_p_control(trans_local, quat_local, asynchronous)
+                # self.ee_move_RRMC(trans_local, quat_local)
+
         trans_lib, quat_lib, _ = self.get_ee_pose(frame='local')
         print('[kinova] target reached', trans_lib, quat_lib)
+        return result
 
     def corrected_target(self, trans_target, quat_target):
         # Current FK and measured EE
@@ -404,6 +408,7 @@ class Kinova:
         self.set_joint_pose(q_target, asynchronous=asynchronous)
         # trans_lib, quat_lib, _ = self.get_ee_pose(frame='local')
         # print('[kinova] target reached', trans_lib, quat_lib)
+        return True
 
     def set_joint_pose(self, joint_pose, asynchronous=False):
         """
@@ -641,7 +646,7 @@ class Kinova:
             return 0.0
         
         try:
-            width = self.gripper.position()
+            width = (40-self.gripper.position())/1000
             return width
         except Exception as e:
             print(f"[Kinova] 夹爪宽度获取失败: {e}")
@@ -682,38 +687,18 @@ class Kinova:
         
         return joint_torque[:7]
     
-    def ee_move_p_control(self, trans_target, quat_target):
-        # trans_current, quat_current, _ = self.get_ee_pose(frame='local')
+    def ee_move_p_control(self, trans_target, quat_target, asynchronous):
+        trans_current, quat_current, _ = self.get_ee_pose(frame='local')
         p_des = np.array([trans_target[0], trans_target[1], trans_target[2]])
         R_des = Rotation.from_quat(quat_target).as_matrix()
         trans_threshold = 1e-2# 1 mm
         rot_threshold = 1.0   # degree
+        torque_threshold = 2.0  # 力矩变化阈值
 
-        while True:
-            trans_current, quat_current, _ = self.get_ee_pose(frame='local')
-            p_cur = np.array(trans_current)
-            R_cur = Rotation.from_quat(quat_current).as_matrix()
-
-            # 误差计算
-            trans_error = np.linalg.norm(p_des - p_cur)  # 欧氏距离
-            rot_error = so3_log(R_des @ R_cur.T)
-            rot_error = np.linalg.norm(rot_error)
-            rot_error_deg = np.degrees(rot_error)
-
-            print('trans_error', trans_error)
-            print('rot_error', rot_error_deg)
-
-            # 判断是否收敛
-            if trans_error < trans_threshold and rot_error_deg < rot_threshold:
-                print('ok')
-                self.stop_motion()
-                break
-            
+        result = True
+        if asynchronous:
             v_cmd, w_cmd = ee_p_control(trans_current, quat_current, trans_target, quat_target)
-            print('v_cmd', v_cmd)
-            print('w_cmd', w_cmd)
-            w_cmd = np.rad2deg(w_cmd)
-            print('w_cmd', w_cmd)
+            w_cmd_degree = np.rad2deg(w_cmd)
             command = Base_pb2.TwistCommand()
 
             command.reference_frame = Base_pb2.CARTESIAN_REFERENCE_FRAME_BASE
@@ -723,34 +708,62 @@ class Kinova:
             twist.linear_x = v_cmd[0]
             twist.linear_y = v_cmd[1]
             twist.linear_z = v_cmd[2]
-            twist.angular_x = w_cmd[0]
-            twist.angular_y = w_cmd[1]
-            twist.angular_z = w_cmd[2]
+            twist.angular_x = w_cmd_degree[0]
+            twist.angular_y = w_cmd_degree[1]
+            twist.angular_z = w_cmd_degree[2]
 
             # print ("Sending the twist command for 5 seconds...")
             self.base.SendTwistCommand(command)
-            time.sleep(0.02)
+            return True
+        else:
+            while True:
+                trans_current, quat_current, _ = self.get_ee_pose(frame='local')
+                curr_torque = self.get_joint_torque()
+                if not self.check_torque_change(torque_threshold):
+                    print('力矩变化超过阈值，放弃控制并退回到上一个位置')
+                    result = False
+                    break
+                p_cur = np.array(trans_current)
+                R_cur = Rotation.from_quat(quat_current).as_matrix()
 
-        # v_cmd, w_cmd = ee_p_control(trans_current, quat_current, trans_target, quat_target)
-        # print('v_cmd', v_cmd)
-        # print('w_cmd', w_cmd)
-        # w_cmd = np.rad2deg(w_cmd)
-        # print('w_cmd', w_cmd)
-        # command = Base_pb2.TwistCommand()
+                # 误差计算
+                trans_error = np.linalg.norm(p_des - p_cur)  # 欧氏距离
+                rot_error = so3_log(R_des @ R_cur.T)
+                rot_error = np.linalg.norm(rot_error)
+                rot_error_deg = np.degrees(rot_error)
 
-        # command.reference_frame = Base_pb2.CARTESIAN_REFERENCE_FRAME_BASE
-        # # command.duration = 0
+                # print('trans_error', trans_error)
+                # print('rot_error', rot_error_deg)
 
-        # twist = command.twist
-        # twist.linear_x = v_cmd[0]
-        # twist.linear_y = v_cmd[1]
-        # twist.linear_z = v_cmd[2]
-        # twist.angular_x = w_cmd[0]
-        # twist.angular_y = w_cmd[1]
-        # twist.angular_z = w_cmd[2]
+                # 判断是否收敛
+                if trans_error < trans_threshold and rot_error_deg < rot_threshold:
+                    self.last_torque = curr_torque
+                    self.last_pos = (trans_current, quat_current, _)
+                    print('ok')
+                    self.stop_motion()
+                    break
+                
+                v_cmd, w_cmd = ee_p_control(trans_current, quat_current, trans_target, quat_target)
+                w_cmd = np.rad2deg(w_cmd)
+                command = Base_pb2.TwistCommand()
 
-        # # print ("Sending the twist command for 5 seconds...")
-        # self.base.SendTwistCommand(command)
+                command.reference_frame = Base_pb2.CARTESIAN_REFERENCE_FRAME_BASE
+                # command.duration = 0
+                self.last_pos = (trans_current, quat_current, _)
+                self.last_torque = curr_torque
+
+                twist = command.twist
+                twist.linear_x = v_cmd[0]
+                twist.linear_y = v_cmd[1]
+                twist.linear_z = v_cmd[2]
+                twist.angular_x = w_cmd[0]
+                twist.angular_y = w_cmd[1]
+                twist.angular_z = w_cmd[2]
+
+                # print ("Sending the twist command for 5 seconds...")
+                self.base.SendTwistCommand(command)
+                time.sleep(0.05)
+        return result
 
     def ee_move_ik(self, trans, quat):
         """
@@ -777,6 +790,29 @@ class Kinova:
         
         finished = e.wait(20)
         self.base.Unsubscribe(notification_handle)    
+
+    def check_torque_change(self, torque_threshold=8.0):
+            """
+            Check if the torque change is within the threshold.
+            """
+            current_torque = self.get_joint_torque()
+            if self.last_torque is not None:
+                torque_diff = np.abs(np.array(current_torque) - np.array(self.last_torque))
+                max_torque_change = np.max(torque_diff)
+                if max_torque_change > torque_threshold:
+                    self.stop_motion()
+                    if self.last_pos is not None:
+                        last_trans, last_quat, _ = self.last_pos
+                        # print(f'退回到位置: {last_trans}, {last_quat}')
+                        # 使用简单的ee_move方法退回到上一个位置
+                        self.ee_move(last_trans, last_quat, asynchronous=False)
+                    self.last_torque = None
+                    self.last_pos = None
+                    return False
+                else:
+                    return True
+
+            return True
 
 
     def ee_move_RRMC(self, trans_target, quat_target):
@@ -823,6 +859,7 @@ class Kinova:
             print('q_v', q_v)
             self.set_joint_velocity(q_v)
 
+            # break
             # 控制频率 10Hz
             time.sleep(0.1)
 
@@ -1007,7 +1044,7 @@ class Kinova:
         lib_ee_trans, lib_ee_quat, lib_ee_rpy = self.get_ee_pose(frame='local')
 
         input_joint_angles = self.base.GetMeasuredJointAngles()
-        self.forward_kinemetics(input_joint_angles)
+        self.forward_kinematics(input_joint_angles)
 
         print('FK:', fk_ee_trans, fk_ee_quat)
         print('lib:', lib_ee_trans, lib_ee_quat)

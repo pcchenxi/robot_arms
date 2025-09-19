@@ -5,6 +5,7 @@ from franky import Affine, JointWaypointMotion, JointWaypoint, JointMotion, Cart
 import numpy as np
 from solvers.curobo_solver import CuRoboIKSolver
 
+# We use franky to control franka robot, please refer to https://github.com/TimSchneider42/franky for more details.
 
 class Franka:
     def __init__(self, robot_ip, relative_dynamics_factor=0.05, control_mode='curobo') -> None:
@@ -123,9 +124,10 @@ class Franka:
 
     def set_ee_pose(self, translation, quaternion, asynchronous=True, frame='global'):
         if self.control_mode == 'curobo':
-            self.set_ee_pose_curobo(translation, quaternion, asynchronous, frame)
+            result = self.set_ee_pose_curobo(translation, quaternion, asynchronous, frame)
         else:
-            self.set_ee_pose_armlib(translation, quaternion, asynchronous, frame)
+            result = self.set_ee_pose_armlib(translation, quaternion, asynchronous, frame)
+        return result
 
     def set_ee_pose_armlib(self, translation, quaternion, asynchronous=True, frame='global'):
         if frame == 'global':
@@ -136,6 +138,7 @@ class Franka:
 
         # can use try -- except to catch libfranka error, recover error and reexecute
         self.robot.move(motion, asynchronous=asynchronous)
+        return True
 
     def set_ee_pose_curobo(self, translation, quaternion, asynchronous=True, frame='global'):
         if frame == 'global':
@@ -146,12 +149,11 @@ class Franka:
         # solving ik using cuRobo
         current_q = self.robot.state.q
         q_target = self.ik_solver.get_target_joint(current_q, trans_local, quat_local)
-        print('set joint')
         self.set_joint_pose(q_target, asynchronous=asynchronous)
+        return True
 
     def set_joint_pose(self, joint_pose, asynchronous=False):
         assert len(joint_pose) == 7
-        print(joint_pose)
         m1 = JointMotion(joint_pose)
         self.robot.move(m1, asynchronous=asynchronous)
 
